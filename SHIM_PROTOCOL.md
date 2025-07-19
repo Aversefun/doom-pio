@@ -5,14 +5,14 @@ stored into the TX FIFO.
 
 Every command is a single u32. The left-most three bits dictate the type of command:
 
-000: Bank jump
-001: Bank call
-010: Bank return
-011: Output
-100: Read data
-101: Write data RAM
-110: Read data RAM
-111: Read input
+    000: Bank jump
+    001: Bank call
+    010: Bank return
+    011: Output
+    100: Read data
+    101: Write data RAM
+    110: Read data RAM
+    111: Read input
 
 Bank jump: Last sixteen bits dictate the bank to jump to.
 
