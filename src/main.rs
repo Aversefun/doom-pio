@@ -1,3 +1,4 @@
+//! PIO DOOM shim
 #![no_std]
 #![no_main]
 
