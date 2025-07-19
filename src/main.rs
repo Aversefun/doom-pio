@@ -7,7 +7,7 @@ use hal::gpio::{FunctionPio0, Pin};
 use hal::pac;
 use hal::pio::PIOExt;
 use panic_halt as _;
-use pio::{Instruction, InstructionOperands};
+use pio::{Instruction, SideSet};
 use rp2040_hal as hal;
 
 #[unsafe(link_section = ".boot2")]
@@ -65,8 +65,6 @@ impl Input {
 
 #[rp2040_hal::entry]
 fn main() -> ! {
-    let banks = [pio_proc::pio_file!("src/pio/doom0.pio")];
-
     let mut pac = pac::Peripherals::take().unwrap();
 
     let sio = Sio::new(pac.SIO);
@@ -80,21 +78,22 @@ fn main() -> ! {
     let led: Pin<_, FunctionPio0, _> = pins.gpio23.into_function();
     let led_pin_id = led.id().num;
 
-    let program_with_defines = &banks[0];
-    let program = &program_with_defines.program;
+    let nop_program_with_defines = pio_proc::pio_asm!(".wrap_target", "nop", ".wrap",);
+    let nop_program = nop_program_with_defines.program;
 
-    let (mut pio, mut sm0, mut sm1, mut sm2, mut sm3) = pac.PIO0.split(&mut pac.RESETS);
-    let mut installed = pio.install(program).unwrap();
-    let (int, frac) = (0, 0);
-    let (mut sm, mut rx, mut tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+    let program = unsafe {
+        core::mem::transmute::<&'static [u8], &'static [u16]>(include_bytes!("../DOOM.bin"))
+    };
+    let prg_loc = 0usize;
+
+    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    let installed = pio.install(&nop_program).unwrap();
+    let (int, frac) = (1, 0); // Same speed as system clock
+    let (sm, mut rx, mut tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
         .set_pins(led_pin_id, 1)
         .clock_divisor_fixed_point(int, frac)
         .build(sm0);
     let mut running_sm = sm.start();
-
-    let mut callstack = [(0u16, 0u8); 1024];
-    let mut callstack_loc = 0usize;
-    let mut current_bank = 0u16;
 
     let mut screen = [[0u16; 64]; 128];
 
@@ -104,92 +103,14 @@ fn main() -> ! {
     let mut input = Input::default();
 
     loop {
+        running_sm.exec_instruction(
+            Instruction::decode(program[prg_loc], SideSet::new(false, 0, false)).unwrap(),
+        );
+
         if !rx.is_empty() {
             let instr = rx.read().unwrap();
             let cmd = (instr & (0b111u32 << 29)) >> 29;
             match cmd {
-                0b000 => {
-                    // bank jump
-
-                    let bank = instr as u16 & u16::MAX;
-
-                    (pio, sm0, sm1, sm2, sm3) = pio
-                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
-                        .split(&mut pac.RESETS);
-
-                    let program_with_defines = &banks[bank as usize];
-                    let program = &program_with_defines.program;
-
-                    installed = pio.install(program).unwrap();
-
-                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
-                        .set_pins(led_pin_id, 1)
-                        .clock_divisor_fixed_point(int, frac)
-                        .build(sm0);
-
-                    running_sm = sm.start();
-                    current_bank = bank;
-                }
-                0b001 => {
-                    // bank call
-
-                    let bank = instr as u16 & u16::MAX;
-
-                    callstack[callstack_loc] = (
-                        current_bank,
-                        (running_sm.instruction_address() & 0b11111) as u8,
-                    );
-                    callstack_loc += 1;
-
-                    (pio, sm0, sm1, sm2, sm3) = pio
-                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
-                        .split(&mut pac.RESETS);
-
-                    let program_with_defines = &banks[bank as usize];
-                    let program = &program_with_defines.program;
-
-                    installed = pio.install(program).unwrap();
-
-                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
-                        .set_pins(led_pin_id, 1)
-                        .clock_divisor_fixed_point(int, frac)
-                        .build(sm0);
-
-                    running_sm = sm.start();
-                    current_bank = bank;
-                }
-                0b010 => {
-                    // Bank return
-
-                    callstack_loc -= 1;
-
-                    let (bank, addr) = callstack[callstack_loc];
-
-                    (pio, sm0, sm1, sm2, sm3) = pio
-                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
-                        .split(&mut pac.RESETS);
-
-                    let program_with_defines = &banks[bank as usize];
-                    let program = &program_with_defines.program;
-
-                    installed = pio.install(program).unwrap();
-
-                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
-                        .set_pins(led_pin_id, 1)
-                        .clock_divisor_fixed_point(int, frac)
-                        .build(sm0);
-
-                    running_sm = sm.start();
-                    running_sm.exec_instruction(Instruction {
-                        operands: InstructionOperands::JMP {
-                            condition: pio::JmpCondition::Always,
-                            address: addr,
-                        },
-                        delay: 0,
-                        side_set: None,
-                    });
-                    current_bank = bank;
-                }
                 0b011 => {
                     // Output to screen.
 

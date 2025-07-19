@@ -5,21 +5,14 @@ stored into the TX FIFO.
 
 Every command is a single u32. The left-most three bits dictate the type of command:
 
-    000: Bank jump
-    001: Bank call
-    010: Bank return
+    000: 
+    001: 
+    010: 
     011: Output
     100: Read data
     101: Write data RAM
     110: Allocate memory
     111: Read input
-
-Bank jump: Last sixteen bits dictate the bank to jump to.
-
-Bank call: Last sixteen bits dictate the bank to call. Current instruction is saved but otherwise nothing is saved. Use read/write
-data RAM to store data persistently.
-
-Bank return: Restores state from before bank call.
 
 Output: Outputs to screen. Data is 565 RGB in the last 16 bits. The bits directly after the command type is the 7-bit X coordinate
 and the 6-bit Y coordinate.

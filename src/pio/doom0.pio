@@ -1,7 +1,0 @@
-.program doom0
-
-    set pindirs, 1 ; Set pin to output
-.wrap_target
-    set pins, 1 [31]
-    set pins, 0 [31]
-.wrap
