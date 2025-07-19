@@ -1,4 +1,7 @@
 {
     "rust-analyzer.check.command": "clippy",
     "git.enabled": false,
+    "rust-analyzer.cargo.target": "thumbv6m-none-eabi",
+    "rust-analyzer.check.allTargets": false,
+    "editor.formatOnSave": true,
 }
