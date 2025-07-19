@@ -7,14 +7,66 @@ use hal::gpio::{FunctionPio0, Pin};
 use hal::pac;
 use hal::pio::PIOExt;
 use panic_halt as _;
+use pio::{Instruction, InstructionOperands};
 use rp2040_hal as hal;
 
 #[unsafe(link_section = ".boot2")]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
+static DOOM_DAT: &[u8] = include_bytes!("../DOOM.dat");
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Input {
+    turn_left: bool,
+    turn_right: bool,
+    forwards: bool,
+    backwards: bool,
+    strafe_left: bool,
+    strafe_right: bool,
+    fire: bool,
+    use_open: bool,
+    run: bool,
+}
+
+impl Input {
+    fn get_bitmask(self) -> u32 {
+        let mut out = 0u32;
+        if self.turn_left {
+            out |= 0b1;
+        }
+        if self.turn_right {
+            out |= 0b10;
+        }
+        if self.forwards {
+            out |= 0b100;
+        }
+        if self.backwards {
+            out |= 0b1000;
+        }
+        if self.strafe_left {
+            out |= 0b10000;
+        }
+        if self.strafe_right {
+            out |= 0b100000;
+        }
+        if self.fire {
+            out |= 0b1000000;
+        }
+        if self.use_open {
+            out |= 0b10000000;
+        }
+        if self.run {
+            out |= 0b100000000;
+        }
+        out
+    }
+}
+
 #[rp2040_hal::entry]
 fn main() -> ! {
+    let banks = [pio_proc::pio_file!("src/pio/doom0.pio")];
+
     let mut pac = pac::Peripherals::take().unwrap();
 
     let sio = Sio::new(pac.SIO);
@@ -28,29 +80,181 @@ fn main() -> ! {
     let led: Pin<_, FunctionPio0, _> = pins.gpio23.into_function();
     let led_pin_id = led.id().num;
 
-    /*const MAX_DELAY: u8 = 31;
-    let mut a = pio::Assembler::<32>::new();
-    let mut wrap_target = a.label();
-    let mut wrap_source = a.label();
-    a.set(pio::SetDestination::PINDIRS, 1);
-    a.bind(&mut wrap_target);
-    a.set_with_delay(pio::SetDestination::PINS, 0, MAX_DELAY);
-    a.set_with_delay(pio::SetDestination::PINS, 1, MAX_DELAY);
-    a.bind(&mut wrap_source);
-    let program = a.assemble_with_wrap(wrap_source, wrap_target);*/
-    let program_defines = pio_proc::pio_file!("src/pio/doom0.pio");
-    let program = program_defines.program;
+    let program_with_defines = &banks[0];
+    let program = &program_with_defines.program;
 
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let installed = pio.install(&program).unwrap();
+    let (mut pio, mut sm0, mut sm1, mut sm2, mut sm3) = pac.PIO0.split(&mut pac.RESETS);
+    let mut installed = pio.install(program).unwrap();
     let (int, frac) = (0, 0);
-    let (sm, _, _) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+    let (mut sm, mut rx, mut tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
         .set_pins(led_pin_id, 1)
         .clock_divisor_fixed_point(int, frac)
         .build(sm0);
-    sm.start();
+    let mut running_sm = sm.start();
+
+    let mut callstack = [(0u16, 0u8); 1024];
+    let mut callstack_loc = 0usize;
+    let mut current_bank = 0u16;
+
+    let mut screen = [[0u16; 64]; 128];
+
+    let mut temp_data = [0u32; 2usize.pow(13)];
+
+    let mut used = [false; 2usize.pow(13)];
+    let mut input = Input::default();
 
     loop {
-        cortex_m::asm::wfi();
+        if !rx.is_empty() {
+            let instr = rx.read().unwrap();
+            let cmd = (instr & (0b111u32 << 29)) >> 29;
+            match cmd {
+                0b000 => {
+                    // bank jump
+
+                    let bank = instr as u16 & u16::MAX;
+
+                    (pio, sm0, sm1, sm2, sm3) = pio
+                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
+                        .split(&mut pac.RESETS);
+
+                    let program_with_defines = &banks[bank as usize];
+                    let program = &program_with_defines.program;
+
+                    installed = pio.install(program).unwrap();
+
+                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+                        .set_pins(led_pin_id, 1)
+                        .clock_divisor_fixed_point(int, frac)
+                        .build(sm0);
+
+                    running_sm = sm.start();
+                    current_bank = bank;
+                }
+                0b001 => {
+                    // bank call
+
+                    let bank = instr as u16 & u16::MAX;
+
+                    callstack[callstack_loc] = (
+                        current_bank,
+                        (running_sm.instruction_address() & 0b11111) as u8,
+                    );
+                    callstack_loc += 1;
+
+                    (pio, sm0, sm1, sm2, sm3) = pio
+                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
+                        .split(&mut pac.RESETS);
+
+                    let program_with_defines = &banks[bank as usize];
+                    let program = &program_with_defines.program;
+
+                    installed = pio.install(program).unwrap();
+
+                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+                        .set_pins(led_pin_id, 1)
+                        .clock_divisor_fixed_point(int, frac)
+                        .build(sm0);
+
+                    running_sm = sm.start();
+                    current_bank = bank;
+                }
+                0b010 => {
+                    // Bank return
+
+                    callstack_loc -= 1;
+
+                    let (bank, addr) = callstack[callstack_loc];
+
+                    (pio, sm0, sm1, sm2, sm3) = pio
+                        .free(running_sm.stop().uninit(rx, tx).0, sm1, sm2, sm3)
+                        .split(&mut pac.RESETS);
+
+                    let program_with_defines = &banks[bank as usize];
+                    let program = &program_with_defines.program;
+
+                    installed = pio.install(program).unwrap();
+
+                    (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+                        .set_pins(led_pin_id, 1)
+                        .clock_divisor_fixed_point(int, frac)
+                        .build(sm0);
+
+                    running_sm = sm.start();
+                    running_sm.exec_instruction(Instruction {
+                        operands: InstructionOperands::JMP {
+                            condition: pio::JmpCondition::Always,
+                            address: addr,
+                        },
+                        delay: 0,
+                        side_set: None,
+                    });
+                    current_bank = bank;
+                }
+                0b011 => {
+                    // Output to screen.
+
+                    let color = instr as u16 & u16::MAX;
+                    let x = (instr & (0b1111111 << 22)) >> 22;
+                    let y = (instr & (0b111111 << 16)) >> 16;
+                    screen[x as usize][y as usize] = color;
+                }
+                0b100 => {
+                    // Read data.
+
+                    let is_static = (instr & (1 << 28)) == (1 << 28);
+                    let addr = instr & 0b1111111111111111111111111111;
+
+                    let out = if is_static {
+                        u32::from_be_bytes([
+                            DOOM_DAT[addr as usize],
+                            DOOM_DAT[addr as usize + 1],
+                            DOOM_DAT[addr as usize + 2],
+                            DOOM_DAT[addr as usize + 3],
+                        ])
+                    } else {
+                        temp_data[addr as usize]
+                    };
+
+                    tx.write(out);
+                }
+                0b101 => {
+                    // Write data RAM.
+
+                    let data = instr as u16 & u16::MAX;
+                    let addr = instr & 0b1111111111110000000000000000;
+
+                    temp_data[addr as usize] = data as u32;
+                    used[addr as usize] = true;
+                }
+                0b110 => {
+                    // Allocate memory.
+
+                    let length = instr as u8 & u8::MAX;
+
+                    let mut contiguous = 0usize;
+                    let mut addr = 0usize;
+                    for (i, used) in used.iter().enumerate() {
+                        if !used {
+                            contiguous += 1;
+                        }
+                        if contiguous >= length as usize {
+                            addr = i;
+                            break;
+                        }
+                        if *used {
+                            contiguous = 0;
+                        }
+                    }
+
+                    tx.write(addr as u32);
+                }
+                0b111 => {
+                    // Read input
+
+                    tx.write(input.get_bitmask());
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
